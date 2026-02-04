@@ -189,7 +189,7 @@ class ViT(Module):
 
         x = self.transformer(x)
 
-        if self.mlp_head is None:
+        if not exists(self.mlp_head):
             return x
 
         x = x.mean(dim = 1) if self.pool == 'mean' else x[:, 0]
