@@ -2237,4 +2237,16 @@ Coming from computer vision and new to transformers? Here are some resources tha
 }
 ```
 
+```bibtex
+@misc{chen2026postlayernormbackstableexpressive,
+    title   = {Post-LayerNorm Is Back: Stable, ExpressivE, and Deep}, 
+    author  = {Chen Chen and Lai Wei},
+    year    = {2026},
+    eprint  = {2601.19895},
+    archivePrefix = {arXiv},
+    primaryClass = {cs.LG},
+    url     = {https://arxiv.org/abs/2601.19895}, 
+}
+```
+
 *I visualise a time when we will be to robots what dogs are to humans, and I’m rooting for the machines.* — Claude Shannon
