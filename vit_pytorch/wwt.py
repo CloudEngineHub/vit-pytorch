@@ -9,6 +9,8 @@ from torch.nn import Module, ModuleList, ParameterList
 from einops import rearrange, repeat, reduce, einsum, pack, unpack
 from einops.layers.torch import Rearrange
 
+from vit_pytorch.lejepa import sigreg_loss
+
 # constants
 
 LinearNoBias = partial(nn.Linear, bias = False)
@@ -27,6 +29,12 @@ def default(val, d):
 
 def pair(t):
     return t if isinstance(t, tuple) else (t, t)
+
+def cast_tuple(val, length = 1):
+    return val if isinstance(val, tuple) else ((val,) * length)
+
+def is_empty(t):
+    return len(t) == 0
 
 def divisible_by(num, den):
     return (num % den) == 0
@@ -92,7 +100,7 @@ class AutoencodingHead(Module):
         # default pathways
 
         pathways = default(self.pathways, tuple((j, self.patch_pathway_id) for i, j in interactions if i == self.patch_pathway_id))
-        assert len(pathways) > 0, 'no valid pathways found'
+        assert not is_empty(pathways), 'no valid pathways found'
 
         # feature map construction
 
@@ -285,6 +293,7 @@ class WWT(Module):
         dim,
         depth,
         num_slots: int | tuple[int, ...],
+        sigreg_slots: bool | tuple[bool, ...] | None = None,
         interactions: tuple[tuple[int, int], ...] | None = None,
         heads = 8,
         dim_head = 64,
@@ -297,7 +306,7 @@ class WWT(Module):
         project_mask_groups = False,
         num_register_tokens = 0,
         num_register_slots: int | tuple[int, ...] = 0,
-        task_heads: tuple[Module, ...] | list[Module] = (),
+        task_heads: Module | tuple[Module, ...] | list[Module] = (),
     ):
         super().__init__()
         image_height, image_width = pair(image_size)
@@ -318,13 +327,19 @@ class WWT(Module):
 
         self.pos_embedding = nn.Parameter(torch.randn(num_patches, dim))
 
-        num_slots = (num_slots,) if isinstance(num_slots, int) else tuple(num_slots)
+        num_slots = cast_tuple(num_slots)
 
         # ensure slots are in decreasing order to establish a part-whole hierarchy
 
         for s1, s2 in zip(num_slots[:-1], num_slots[1:]):
             assert s1 > s2, 'to establish a part-whole hierarchy, the number of slots must be strictly decreasing across levels'
         num_hierarchies = 1 + len(num_slots)
+
+        if exists(sigreg_slots):
+            sigreg_slots = cast_tuple(sigreg_slots, len(num_slots))
+            assert len(sigreg_slots) == len(num_slots)
+
+        self.sigreg_slots = sigreg_slots
 
         self.interactions = default(interactions, tuple((0, i + 1) for i in range(len(num_slots))))
         self.interactions = tuple(tuple(interaction) for interaction in self.interactions)
@@ -334,7 +349,7 @@ class WWT(Module):
             assert i < j, 'each interaction must be in strictly ascending order (from lower index to higher index)'
         self.slots = ParameterList([nn.Parameter(torch.randn(n, dim)) for n in num_slots])
 
-        num_register_slots = (num_register_slots,) * len(num_slots) if isinstance(num_register_slots, int) else tuple(num_register_slots)
+        num_register_slots = cast_tuple(num_register_slots, len(num_slots))
         assert len(num_register_slots) == len(num_slots)
 
         self.register_tokens = nn.Parameter(torch.randn(num_register_tokens, dim))
@@ -365,8 +380,12 @@ class WWT(Module):
         ) for _ in range(depth)])
 
         self.mlp_head = nn.Sequential(LayerNormNoBias(dim), nn.Linear(dim, num_classes))
+
+        if isinstance(task_heads, Module):
+            task_heads = (task_heads,)
+
         self.task_heads = ModuleList(task_heads)
-        self.has_task_heads = len(self.task_heads) > 0
+        self.has_task_heads = not is_empty(self.task_heads)
         self.return_tokens = return_tokens
 
         if self.return_tokens:
@@ -431,12 +450,25 @@ class WWT(Module):
             pooled_token_logits = reduce(self.mlp_head_tokens(tokens_out), 'b t c -> b c', 'mean')
             out = WWTReturn(pooled_slot_logits, pooled_token_logits)
 
+        # sigreg loss
+
+        sreg_loss = None
+        if exists(self.sigreg_slots):
+            sreg_losses = [sigreg_loss(s) for s, compute in zip(slots_out, self.sigreg_slots) if compute]
+            if not is_empty(sreg_losses):
+                sreg_loss = sum(sreg_losses)
+
         # task heads
 
-        if not self.has_task_heads:
-            return out
+        ret = (out,) if self.has_task_heads else out
 
-        return (out, *(head(hierarchy_features, processed_masks, self.interactions) for head in self.task_heads))
+        if self.has_task_heads:
+            ret = (*ret, *(head(hierarchy_features, processed_masks, self.interactions) for head in self.task_heads))
+
+        if exists(sreg_loss):
+            ret = (*ret, sreg_loss) if isinstance(ret, tuple) else (ret, sreg_loss)
+
+        return ret
 
 if __name__ == '__main__':
     configs = (
@@ -463,6 +495,7 @@ if __name__ == '__main__':
             dim = 256,
             depth = 2,
             num_slots = (64, 32, 16),
+            sigreg_slots = (True, False, True),
             interactions = ((0, 1), (0, 2), (1, 2), (2, 3)),
             heads = 4,
             mlp_dim = 512,
@@ -472,12 +505,12 @@ if __name__ == '__main__':
             project_mask_groups = project_mask_groups,
             num_register_tokens = 4,
             num_register_slots = (4, 4, 2),
-            task_heads = [autoencoding_head]
+            task_heads = autoencoding_head
         )
 
         img = torch.randn(1, 3, 256, 256)
 
-        out, dense_feature_maps = model(img)
+        out, dense_feature_maps, sreg_loss = model(img)
         slot_preds, token_preds = out
 
         assert slot_preds.shape == (1, 1000)
@@ -492,5 +525,7 @@ if __name__ == '__main__':
             assert dense_320.shape == (1, 8, 8, 256)
 
         assert dense_023.shape == (1, 16, 256)
+
+        assert sreg_loss.ndim == 0
 
         print('success')
