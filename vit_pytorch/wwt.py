@@ -155,7 +155,8 @@ class MutualAttention(Module):
         dropout = 0.,
         l1norm_after_tokens_softmax = False,
         token_softmax_over_slots = False,
-        project_mask_groups = False
+        project_mask_groups = False,
+        gate_attention = True
     ):
         super().__init__()
         self.heads = heads
@@ -186,6 +187,19 @@ class MutualAttention(Module):
             dropout = dropout,
             out_dim = self.mask_groups * heads * num_slots
         )
+
+        self.gate_attention = gate_attention
+        if gate_attention:
+            self.tokens_gate = nn.Sequential(
+                LinearNoBias(dim, heads),
+                Rearrange('b t h -> b h t 1'),
+                nn.Sigmoid()
+            )
+            self.slots_gate = nn.Sequential(
+                LinearNoBias(dim, heads),
+                Rearrange('b s h -> b h s 1'),
+                nn.Sigmoid()
+            )
 
     def forward(self, tokens, slots, mask):
         h, g = self.heads, self.q_groups
@@ -219,8 +233,15 @@ class MutualAttention(Module):
 
         # aggregate
 
-        tokens_out = self.to_out_tokens(rearrange(einsum(attn_tokens, v_slots, 'b h t s, b h s d -> b h t d'), 'b h t d -> b t (h d)'))
-        slots_out = self.to_out_slots(rearrange(einsum(attn_slots, v_tokens, 'b h t s, b h t d -> b h s d'), 'b h s d -> b s (h d)'))
+        tokens_out_pre = einsum(attn_tokens, v_slots, 'b h t s, b h s d -> b h t d')
+        slots_out_pre = einsum(attn_slots, v_tokens, 'b h t s, b h t d -> b h s d')
+
+        if self.gate_attention:
+            tokens_out_pre = tokens_out_pre * self.tokens_gate(tokens)
+            slots_out_pre = slots_out_pre * self.slots_gate(slots)
+
+        tokens_out = self.to_out_tokens(rearrange(tokens_out_pre, 'b h t d -> b t (h d)'))
+        slots_out = self.to_out_slots(rearrange(slots_out_pre, 'b h s d -> b s (h d)'))
 
         # mask update
 
@@ -246,7 +267,8 @@ class WWTBlock(Module):
         dropout = 0.,
         l1norm_after_tokens_softmax = False,
         token_softmax_over_slots = False,
-        project_mask_groups = False
+        project_mask_groups = False,
+        gate_attention = True
     ):
         super().__init__()
         self.interactions = interactions
@@ -260,7 +282,8 @@ class WWTBlock(Module):
             dropout = dropout,
             l1norm_after_tokens_softmax = l1norm_after_tokens_softmax,
             token_softmax_over_slots = token_softmax_over_slots,
-            project_mask_groups = project_mask_groups
+            project_mask_groups = project_mask_groups,
+            gate_attention = gate_attention
         ) for _, j in interactions])
 
         self.norms = ModuleList([LayerNormNoBias(dim) for _ in range(num_hierarchies)])
@@ -304,6 +327,7 @@ class WWT(Module):
         l1norm_after_tokens_softmax = False,
         token_softmax_over_slots = False,
         project_mask_groups = False,
+        gate_attention = True,
         num_register_tokens = 0,
         num_register_slots: int | tuple[int, ...] = 0,
         task_heads: Module | tuple[Module, ...] | list[Module] = (),
@@ -376,7 +400,8 @@ class WWT(Module):
             dropout = dropout,
             l1norm_after_tokens_softmax = l1norm_after_tokens_softmax,
             token_softmax_over_slots = token_softmax_over_slots,
-            project_mask_groups = project_mask_groups
+            project_mask_groups = project_mask_groups,
+            gate_attention = gate_attention
         ) for _ in range(depth)])
 
         self.mlp_head = nn.Sequential(LayerNormNoBias(dim), nn.Linear(dim, num_classes))
