@@ -44,7 +44,7 @@ class FeedForward(Module):
 
     def forward(self, x):
         return self.net(x)
-    
+
 class AxialRotaryEmbedding(nn.Module):
     def __init__(self, dim, num_registers=4, base=100000, reg_base=100):
         super().__init__()
@@ -135,13 +135,13 @@ class Attention(Module):
         out = torch.matmul(attn, v)
         out = rearrange(out, 'b h n d -> b n (h d)')
         return self.to_out(out)
-    
+
 class Transformer(Module):
     def __init__(self, dim, depth, heads, dim_head, mlp_dim, dropout = 0.):
         super().__init__()
         self.norm = RMSNorm(dim)
         self.layers = ModuleList([])
-        
+
         self.ls1 = nn.ParameterList([])
         self.ls2 = nn.ParameterList([])
 
