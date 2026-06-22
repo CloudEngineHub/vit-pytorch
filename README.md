@@ -1650,6 +1650,7 @@ out = model(img)  # (1, 1000)
 
 Vision Transformers for the Mid-2020s. An updated ViT architecture combining RMSNorm, QK-norm, LayerScale, register tokens, and 2D axial RoPE (applied to patch and register tokens, excluding the CLS token).
 
+Contributed by [Pranoy](https://github.com/pranoyr)!
 
 ```python
 import torch
